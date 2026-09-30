@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Taks Marcomm - Collaborative Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Firebase SDK (Modular v10) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
+
+        // ==========================================
+        // GANTI BAGIAN INI DENGAN FIREBASE CONFIG ANDA
+        // ==========================================
+        const firebaseConfig = {
+            apiKey: "AIzaSyBAnpYeKGKz4JvTClKxLZ5Ace6ZYxX1uWk",
+  authDomain: "marcomm-taks.firebaseapp.com",
+  projectId: "marcomm-taks",
+  storageBucket: "marcomm-taks.firebasestorage.app",
+  messagingSenderId: "1045758870102",
+  appId: "1:1045758870102:web:a4c9a5ad1ee4950a63b1f7",
+  measurementId: "G-7ZS4M7479F"
+        };
+
+        // Inisialisasi Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const storage = getStorage(app);
+
+        let clipboardImageFile = null;
+
+        window.openModal = function() {
+            document.getElementById('taskModal').classList.remove('hidden');
+            document.getElementById('taskModal').classList.add('flex');
+            document.getElementById('taskDate').valueAsDate = new Date();
+        }
+
+        window.closeModal = function() {
+            document.getElementById('taskModal').classList.add('hidden');
+            document.getElementById('taskModal').classList.remove('flex');
+            document.getElementById('taskForm').reset();
+            document.getElementById('pastePreview').classList.add('hidden');
+            clipboardImageFile = null;
+        }
+
+        // Tangkap event Paste (Ctrl+V) di seluruh modal
+        document.getElementById('taskModal').addEventListener('paste', function(e) {
+            const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+            for (let item of items) {
+                if (item.type.indexOf('image') === 0) {
+                    const blob = item.getAsFile();
+                    clipboardImageFile = blob;
+                    
+                    const reader = new FileReader();
+                    reader.onload = function(event) {
+                        const preview = document.getElementById('previewImg');
+                        preview.src = event.target.result;
+                        document.getElementById('pastePreview').classList.remove('hidden');
+                    }
+                    reader.readAsDataURL(blob);
+                    break;
+                }
+            }
+        });
+
+        // Kirim Task Baru ke Firestore & Firebase Storage
+        window.saveTask = async function(e) {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fa-solid fa-spinner animate-spin mr-2"></i> Menyimpan...`;
+
+            try {
+                const title = document.getElementById('taskTitle').value;
+                const desc = document.getElementById('taskDesc').value;
+                const date = document.getElementById('taskDate').value;
+                const status = document.getElementById('taskStatus').value;
+                
+                const fileInput = document.getElementById('taskPhoto').files[0];
+                let photoUrl = "";
+
+                // Pilih sumber file: Upload manual atau dari hasil Paste (Ctrl+V)
+                let imageToUpload = fileInput || clipboardImageFile;
+
+                if (imageToUpload) {
+                    const filename = `marcomm_${Date.now()}_${imageToUpload.name || 'pasted.png'}`;
+                    const storageRef = ref(storage, 'task_photos/' + filename);
+                    const snapshot = await uploadBytes(storageRef, imageToUpload);
+                    photoUrl = await getDownloadURL(snapshot.ref);
+                }
+
+                // Simpan data dokumen ke Firestore
+                await addDoc(collection(db, "tasks"), {
+                    title,
+                    desc,
+                    date,
+                    status,
+                    photoUrl,
+                    createdAt: new Date()
+                });
+
+                closeModal();
+            } catch (error) {
+                console.error("Gagal menyimpan tugas: ", error);
+                alert("Terjadi kesalahan saat menyimpan data.");
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = `Simpan Tugas`;
+            }
+        }
+
+        // Ubah Status Task (Ongoing <-> Completed)
+        window.toggleStatus = async function(id, currentStatus) {
+            const newStatus = currentStatus === 'ongoing' ? 'completed' : 'ongoing';
+            try {
+                const taskRef = doc(db, "tasks", id);
+                await updateDoc(taskRef, { status: newStatus });
+            } catch (error) {
+                console.error("Gagal mengubah status: ", error);
+            }
+        }
+
+        // Hapus Task
+        window.deleteTask = async function(id) {
+            if(confirm('Yakin ingin menghapus tugas ini dari sistem?')) {
+                try {
+                    await deleteDoc(doc(db, "tasks", id));
+                } catch (error) {
+                    console.error("Gagal menghapus tugas: ", error);
+                }
+            }
+        }
+
+        // Real-time Listener (Data otomatis sinkron ke semua pengguna tanpa refresh)
+        const q = query(collection(db, "tasks"), orderBy("createdAt", "desc"));
+        onSnapshot(q, (snapshot) => {
+            const ongoingContainer = document.getElementById('list-ongoing');
+            const completedContainer = document.getElementById('list-completed');
+            
+            ongoingContainer.innerHTML = '';
+            completedContainer.innerHTML = '';
+
+            let ongoingCount = 0;
+            let completedCount = 0;
+
+            snapshot.forEach((docSnap) => {
+                const task = { id: docSnap.id, ...docSnap.data() };
+                const card = document.createElement('div');
+                card.className = "bg-white border border-slate-200/80 rounded-xl p-4 flex flex-col gap-3 shadow-xs hover:shadow-md transition";
+                
+                let photoHtml = task.photoUrl ? `
+                    <a href="${task.photoUrl}" target="_blank" class="block overflow-hidden rounded-lg border border-slate-100 group">
+                        <img src="${task.photoUrl}" class="w-full h-40 object-cover group-hover:scale-105 transition duration-300">
+                    </a>` : '';
+                
+                card.innerHTML = `
+                    ${photoHtml}
+                    <div>
+                        <div class="flex justify-between items-start mb-1">
+                            <span class="text-[11px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-md"><i class="fa-regular fa-calendar mr-1"></i> ${task.date || '-'}</span>
+                        </div>
+                        <h3 class="font-bold text-slate-800 text-sm leading-snug">${task.title}</h3>
+                        <p class="text-xs text-slate-500 mt-1 whitespace-pre-line">${task.desc || 'Tidak ada catatan.'}</p>
+                    </div>
+                    <div class="flex justify-between items-center pt-3 border-t border-slate-100 mt-auto">
+                        <button onclick="toggleStatus('${task.id}', '${task.status}')" class="text-xs font-semibold px-3 py-1.5 rounded-lg transition cursor-pointer ${task.status === 'ongoing' ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200/60' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200/60'}">
+                            <i class="fa-solid ${task.status === 'ongoing' ? 'fa-check mr-1' : 'fa-rotate-left mr-1'}"></i> 
+                            ${task.status === 'ongoing' ? 'Tandai Selesai' : 'Kembalikan ke Proses'}
+                        </button>
+                        <button onclick="deleteTask('${task.id}')" class="text-slate-400 hover:text-rose-600 text-xs p-1.5 transition cursor-pointer" title="Hapus Tugas">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </button>
+                    </div>
+                `;
+
+                if(task.status === 'ongoing') {
+                    ongoingContainer.appendChild(card);
+                    ongoingCount++;
+                } else {
+                    completedContainer.appendChild(card);
+                    completedCount++;
+                }
+            });
+
+            document.getElementById('count-ongoing').innerText = ongoingCount;
+            document.getElementById('count-completed').innerText = completedCount;
+
+            if(ongoingCount === 0) {
+                ongoingContainer.innerHTML = `<div class="text-center py-12 text-slate-400 text-xs">Belum ada tugas dalam pengerjaan.</div>`;
+            }
+            if(completedCount === 0) {
+                completedContainer.innerHTML = `<div class="text-center py-12 text-slate-400 text-xs">Belum ada tugas yang selesai.</div>`;
+            }
+        });
+    </script>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans min-h-screen p-4 md:p-8">
+
+    <div class="max-w-5xl mx-auto">
+        <!-- Header -->
+        <header class="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200/60 flex flex-col md:flex-row justify-between items-center gap-4">
+            <div>
+                <span class="text-xs font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-md">Divisi Internal Dashboard</span>
+                <h1 class="text-2xl md:text-3xl font-extrabold text-slate-900 mt-1">Taks Marcomm</h1>
+                <p class="text-sm text-slate-500 mt-0.5">Pantau progres pekerjaan, status real-time, dan dokumentasi foto divisi secara terpusat.</p>
+            </div>
+            <button onclick="openModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-5 py-3 rounded-xl transition shadow-sm flex items-center gap-2 cursor-pointer text-sm">
+                <i class="fa-solid fa-plus text-xs"></i> Tambah Tugas Baru
+            </button>
+        </header>
+
+        <!-- Main Content Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            
+            <!-- Kolom: Sedang Dikerjakan -->
+            <div class="bg-slate-50/70 rounded-2xl p-5 border border-slate-200/80">
+                <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-200">
+                    <h2 class="font-bold text-base text-amber-700 flex items-center gap-2">
+                        <i class="fa-solid fa-clock-rotate-left"></i> Sedang Dikerjakan
+                    </h2>
+                    <span id="count-ongoing" class="bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">0</span>
+                </div>
+                <div id="list-ongoing" class="space-y-4 min-h-[300px]">
+                    <!-- Data masuk otomatis via Firebase -->
+                </div>
+            </div>
+
+            <!-- Kolom: Selesai -->
+            <div class="bg-slate-50/70 rounded-2xl p-5 border border-slate-200/80">
+                <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-200">
+                    <h2 class="font-bold text-base text-emerald-700 flex items-center gap-2">
+                        <i class="fa-solid fa-circle-check"></i> Sudah Selesai
+                    </h2>
+                    <span id="count-completed" class="bg-emerald-100 text-emerald-800 text-xs font-bold px-2.5 py-1 rounded-full">0</span>
+                </div>
+                <div id="list-completed" class="space-y-4 min-h-[300px]">
+                    <!-- Data masuk otomatis via Firebase -->
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Modal Form Tambah Tugas -->
+    <div id="taskModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs hidden justify-center items-center p-4 z-50">
+        <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
+                <h3 class="font-bold text-lg text-slate-900">Form Task Marcomm</h3>
+                <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 cursor-pointer p-1"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+            <form id="taskForm" onsubmit="saveTask(event)" class="space-y-4">
+                <div>
+                    <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Judul Pekerjaan</label>
+                    <input type="text" id="taskTitle" required placeholder="Contoh: Pembuatan Konten Instagram Reels..." class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-indigo-600 text-sm bg-slate-50/50">
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Tanggal Pengerjaan</label>
+                        <input type="date" id="taskDate" required class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-indigo-600 text-sm bg-slate-50/50">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Status Awal</label>
+                        <select id="taskStatus" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-indigo-600 text-sm bg-slate-50/50">
+                            <option value="ongoing">Sedang Dikerjakan</option>
+                            <option value="completed">Sudah Selesai</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Catatan / Deskripsi</label>
+                    <textarea id="taskDesc" rows="3" placeholder="Detail atau instruksi tugas..." class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 focus:outline-indigo-600 text-sm bg-slate-50/50"></textarea>
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Lampiran Foto (File / Paste Screenshot)</label>
+                    <input type="file" id="taskPhoto" accept="image/*" class="w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer mb-2">
+                    <p class="text-[11px] text-slate-400 italic">💡 Tips: Anda juga bisa menempelkan (Ctrl+V) gambar langsung ke area modal ini.</p>
+                    
+                    <!-- Preview Foto Hasil Paste -->
+                    <div id="pastePreview" class="hidden mt-3 relative border border-slate-200 rounded-xl p-2 bg-slate-50">
+                        <span class="text-[10px] font-bold text-indigo-600 block mb-1">Foto dari Clipboard (Ctrl+V):</span>
+                        <img id="previewImg" class="h-32 object-contain rounded-md mx-auto">
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                    <button type="button" onclick="closeModal()" class="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-sm font-medium hover:bg-slate-50 cursor-pointer">Batal</button>
+                    <button type="submit" id="submitBtn" class="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold transition cursor-pointer shadow-sm">Simpan Tugas</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
